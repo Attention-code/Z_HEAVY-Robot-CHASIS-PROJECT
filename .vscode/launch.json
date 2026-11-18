@@ -1,0 +1,68 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "OpenOCD: Debug",
+            "cwd": "${workspaceFolder}",
+            "executable": "${command:cmake.getLaunchTargetPath}",
+            "request": "launch",
+            "type": "cortex-debug",
+            "servertype": "openocd",
+            "configFiles": [
+                "openocd.cfg",
+            ],
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": 20
+            },
+            "rttConfig": {
+                "enabled": true,
+                "address": "auto",
+                "polling_interval": 10,
+                "decoders": [
+                    {
+                        "port": 0,
+                        "type": "console",
+                        "label": "RTT Channel 0"
+                    },
+                    {
+                        "port": 1,
+                        "type": "graph",
+                        "encoding": "float",
+                        "graphId": "plot0",
+                        "label": "FL target"
+                    },
+                    {
+                        "port": 2,
+                        "type": "graph",
+                        "encoding": "float",
+                        "graphId": "plot1",
+                        "label": "FL feedback"
+                    }
+                ]
+            },
+            "graphConfig": [
+                {
+                    "type": "realtime",
+                    "label": "底盘左前轮 目标/反馈轮速 (rad/s)",
+                    "timespan": 10,
+                    "minimum": -25.0,
+                    "maximum": 25.0,
+                    "plots": [
+                        {
+                            "graphId": "plot0",
+                            "label": "FL target",
+                            "color": "#1c8c5a"
+                        },
+                        {
+                            "graphId": "plot1",
+                            "label": "FL feedback",
+                            "color": "#c24344"
+                        }
+                    ]
+                }
+            ],
+            "preLaunchTask": "CMake: build"
+        }
+    ]
+}

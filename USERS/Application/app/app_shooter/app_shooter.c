@@ -1,0 +1,97 @@
+//@note 根据交换层指令触发拨弹，上升沿检测实现单发射击，处理自动连发逻辑并发布反馈（无摩擦轮）。
+
+#include "app_shooter.h"
+ 
+#include <math.h>
+
+/* ======================== 公共 API ======================== */
+
+/**
+ * @brief  初始化射击器模块。
+ * @param  me      指向调用方分配的实例。
+ * @param  config  静态配置（内部拷贝）。
+ * @return 成功返回 BSP_STATUS_OK，参数无效返回 BSP_STATUS_INVALID_ARGUMENT。
+ */
+bsp_status_t app_shooter_init(app_shooter_t *me, const app_shooter_config_t *config)
+{
+    if ((me == NULL) || (config == NULL) || (config->shooter == NULL))
+    {
+        return BSP_STATUS_INVALID_ARGUMENT;
+    }
+    *me = (app_shooter_t){
+        .config = *config,
+        .initialized = true,
+    };
+    return BSP_STATUS_OK;
+}
+
+/**
+ * @brief  执行一个射击器控制周期。
+ * @param  me            已初始化的射击器实例。
+ * @param  delta_time_s  距上次调用的经过时间 [s]。
+ *
+ * 读取射击器指令和云台反馈，在收到射击需求时使能拨弹机构，通过
+ * fire_requested 上升沿检测触发单发，处理自动连发逻辑，
+ * 最后将反馈保存在实例中。
+ */
+bsp_status_t app_shooter_update(app_shooter_t *me,
+                                const app_shooter_command_t *command,
+                                const app_gimbal_feedback_t *gimbal,
+                                float delta_time_s)
+{
+    app_shooter_feedback_t feedback;
+    bool had_error = false;
+
+    if ((me == NULL) || (command == NULL) || (gimbal == NULL) ||
+        !isfinite(delta_time_s) || (delta_time_s <= 0.0F))
+    {
+        return BSP_STATUS_INVALID_ARGUMENT;
+    }
+    if (!me->initialized)
+    {
+        return BSP_STATUS_NOT_INITIALIZED;
+    }
+
+    /* 收到射击需求时使能拨弹机构（启用后由状态机保持）。 */
+    if ((command->fire_requested || command->automatic_fire_enabled) &&
+        (module_shooter_get_state(me->config.shooter) == MODULE_SHOOTER_STATE_DISABLED))
+    {
+        had_error = module_shooter_enable(me->config.shooter) != MODULE_SHOOTER_STATUS_OK;
+    }
+
+    /* 单发触发：通过 fire_requested 上升沿检测，每沿发射 1 发。 */
+    if (command->fire_requested && !me->previous_fire_request)
+    {
+        had_error = (module_shooter_request_shots(me->config.shooter, 1U) !=
+                     MODULE_SHOOTER_STATUS_OK) || had_error;
+    }
+    me->previous_fire_request = command->fire_requested;
+
+    /* 自动连发：当视觉跟踪就绪且裁判系统允许时持续发射。 */
+    if (command->automatic_fire_enabled)
+    {
+        const module_shooter_fire_control_input_t fire_control = {
+            .automatic_fire_enabled = true,
+            .tracking_ready = gimbal->target_locked,
+            .referee_allows_fire = true,
+        };
+        had_error = (module_shooter_update_fire_control(me->config.shooter, &fire_control,
+                                                        delta_time_s) !=
+                     MODULE_SHOOTER_STATUS_OK) || had_error;
+    }
+    had_error = (module_shooter_update(me->config.shooter, delta_time_s) !=
+                 MODULE_SHOOTER_STATUS_OK) || had_error;
+
+    /* 汇总射击器反馈。 */
+    feedback.state = (uint8_t)module_shooter_get_state(me->config.shooter);
+    feedback.jam_retry_count = module_shooter_get_jam_retry_count(me->config.shooter);
+    feedback.fire_permission = module_shooter_get_fire_permission(me->config.shooter);
+
+    me->feedback = feedback;
+    return had_error ? BSP_STATUS_IO_ERROR : BSP_STATUS_OK;
+}
+
+const app_shooter_feedback_t *app_shooter_get_feedback(const app_shooter_t *me)
+{
+    return ((me != NULL) && me->initialized) ? &me->feedback : NULL;
+}

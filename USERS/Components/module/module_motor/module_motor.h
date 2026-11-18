@@ -1,0 +1,224 @@
+/**
+ * @brief 为电机对象提供统一的注册、使能、失能、目标设置、周期更新和反馈接口。
+ * @note 派生类第一成员必须命名为 super，虚表使用只读 module_motor_ops_t。
+ *       电机状态码保持在本模块内。
+ */
+
+#ifndef MODULE_MOTOR_H
+#define MODULE_MOTOR_H
+
+#include "alg_pid.h"
+
+#include <stdbool.h> // bool
+#include <stddef.h>  // size_t, offsetof
+#include <stdint.h>  // uint32_t
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
+    /* ========================================================================
+     * 容器宏 — 别名到 ECF 统一宏
+     * ======================================================================== */
+
+#define MODULE_MOTOR_CONTAINER_OF(member_pointer, parent_type, member_name)                        \
+    ((parent_type *)((uint8_t *)(member_pointer) - offsetof(parent_type, member_name)))
+#define MODULE_MOTOR_CONTAINER_OF_CONST(member_pointer, parent_type, member_name)                  \
+    ((const parent_type *)((const uint8_t *)(member_pointer) - offsetof(parent_type, member_name)))
+#define MODULE_MOTOR_STATIC_ASSERT_SUPER_FIRST(derived_type)                                       \
+    _Static_assert(offsetof(derived_type, super) == 0U, #derived_type " must place super first")
+
+    /* ========================================================================
+     * 状态码 — 别名到 ECF 统一状态码
+     * ======================================================================== */
+
+    typedef enum
+    {
+        MODULE_MOTOR_STATUS_OK = 0,
+        MODULE_MOTOR_STATUS_INVALID_ARGUMENT,
+        MODULE_MOTOR_STATUS_NOT_INITIALIZED,
+        MODULE_MOTOR_STATUS_NOT_REGISTERED,
+        MODULE_MOTOR_STATUS_ALREADY_REGISTERED,
+        MODULE_MOTOR_STATUS_DUPLICATE_KEY,
+        MODULE_MOTOR_STATUS_NO_RESOURCE,
+        MODULE_MOTOR_STATUS_OUT_OF_RANGE,
+        MODULE_MOTOR_STATUS_OUTPUT_INHIBITED,
+        MODULE_MOTOR_STATUS_UNSUPPORTED,
+        MODULE_MOTOR_STATUS_TRANSPORT_ERROR,
+        MODULE_MOTOR_STATUS_FEEDBACK_UNAVAILABLE,
+        MODULE_MOTOR_STATUS_ALREADY_INITIALIZED
+    } module_motor_status_t;
+
+    /* ======================== 前向声明 ======================== */
+
+    typedef struct module_motor module_motor_t;
+
+    /* ======================== 电机状态枚举 ======================== */
+
+    /**
+     * @brief 电机运行状态
+     */
+    typedef enum
+    {
+        MODULE_MOTOR_STATE_DISABLED = 0, // 禁用（无输出）
+        MODULE_MOTOR_STATE_ENABLED,      // 使能（允许输出）
+        MODULE_MOTOR_STATE_FAULT         // 故障（输出被禁止）
+    } module_motor_state_t;
+
+    /** @brief 单个电机控制环的 PID 配置 */
+    typedef alg_pid_config_t module_motor_pid_config_t;
+    typedef alg_pid_t module_motor_pid_t;
+
+    /* ======================== 反馈数据结构 ======================== */
+
+    /**
+     * @brief 电机反馈数据（由派生类填充）
+     * @note 所有物理量使用 SI 单位：位置 rad，速度 rad/s，扭矩 Nm，电流 A，温度 °C
+     */
+    typedef struct
+    {
+        float position_rad;                    // 位置（弧度）
+        float velocity_rad_per_s;              // 速度（rad/s）
+        float torque_nm;                       // 扭矩（Nm）
+        float current_a;                       // 电流（A）
+        float motor_temperature_c;             // 电机温度（°C）
+        int16_t current_raw;                   // 原始电流值（协议原始值）
+        uint32_t raw_position;                 // 原始位置值（协议原始值）
+        uint32_t update_count;                 // 反馈更新计数
+        uint32_t elapsed_time_since_update_ms; // 距上次更新的时间（毫秒）
+        bool is_current_a_valid;               // current_a 是否有效（已换算）
+        bool is_online;                        // 是否在线（最近收到反馈）
+    } module_motor_feedback_t;
+
+    /* ======================== 虚表结构 ======================== */
+
+    /**
+     * @brief 电机操作虚表（由派生类在 .c 中静态定义）
+     * @note 所有函数必须实现（不能为 NULL）
+     */
+    typedef struct
+    {
+        module_motor_status_t (*enable)(module_motor_t *const me);  // 使能电机
+        module_motor_status_t (*disable)(module_motor_t *const me); // 禁用电机
+        module_motor_status_t (*can_clear_fault)(const module_motor_t *const me); // 检查故障是否已解除
+        module_motor_status_t (*set_target)(module_motor_t *const me,
+                                            float target_value);                       // 设置目标
+        module_motor_status_t (*update)(module_motor_t *const me, float delta_time_s); // 周期更新
+    } module_motor_ops_t;
+
+    /* ======================== 电机基类 ======================== */
+
+    /**
+     * @brief 电机基类
+     * @note 派生类必须将 super 作为第一个成员
+     */
+    struct module_motor
+    {
+        const module_motor_ops_t *vptr;   // 虚表指针（只读）
+        const char *name;                 // 调试显示名称，字符串由调用者长期持有
+        float last_delta_time_s;          // 最近一次成功更新的时间步长
+        uint64_t enabled_runtime_us;       // 累计使能且成功更新的时间
+        module_motor_state_t state;       // 当前运行状态
+        module_motor_feedback_t feedback; // 反馈数据
+        uint32_t feedback_timeout_ms;     // 反馈超时时间（0 表示禁用）
+        bool is_initialized;              // 是否已初始化
+        bool is_registered;               // 是否已连接到电机总线
+    };
+
+    /* ======================== 公共 API ======================== */
+
+    /**
+     * @brief 初始化电机基类
+     * @param me 电机对象
+     * @param vptr 虚表指针
+     * @return 执行状态
+     */
+    module_motor_status_t module_motor_init_base(module_motor_t *const me,
+                                                 const module_motor_ops_t *const vptr,
+                                                 const char *name);
+
+    void module_motor_set_output_allowed(bool allowed);
+    bool module_motor_output_allowed(void);
+
+    /**
+     * @brief 使能电机（调用虚表 enable）
+     * @param me 电机对象
+     * @return 执行状态
+     * @note 未注册、故障或离线状态下无法使能
+     */
+    module_motor_status_t module_motor_enable(module_motor_t *const me);
+
+    /**
+     * @brief 禁用电机（调用虚表 disable）
+     * @param me 电机对象
+     * @return 执行状态
+     */
+    module_motor_status_t module_motor_disable(module_motor_t *const me);
+
+    /**
+     * @brief 清除故障状态（仅当反馈在线且派生类确认故障已解除时）
+     * @param me 电机对象
+     * @return 执行状态
+     * @note 清除后状态变为 DISABLED，需要显式 enable 才能恢复输出
+     */
+    module_motor_status_t module_motor_clear_fault(module_motor_t *const me);
+
+    /**
+     * @brief 设置目标值（调用虚表 set_target）
+     * @param me 电机对象
+     * @param target_value 目标值（含义取决于派生类）
+     * @return 执行状态
+     */
+    module_motor_status_t module_motor_set_target(module_motor_t *const me, float target_value);
+
+    /**
+     * @brief 周期更新电机（调用虚表 update）
+     * @param me 电机对象
+     * @param delta_time_s 时间步长（秒）
+     * @return 执行状态
+     * @note 若反馈离线且电机使能，自动进入故障状态
+     */
+    module_motor_status_t module_motor_update(module_motor_t *const me, float delta_time_s);
+
+    /**
+     * @brief 设置反馈超时时间
+     * @param me 电机对象
+     * @param feedback_timeout_ms 超时时间（毫秒），0 表示禁用
+     * @return 执行状态
+     */
+    module_motor_status_t module_motor_set_feedback_timeout(module_motor_t *const me,
+                                                            uint32_t feedback_timeout_ms);
+
+    /**
+     * @brief 更新反馈超时计时（需周期性调用）
+     * @param me 电机对象
+     * @param elapsed_time_ms 距上次调用的时间（毫秒）
+     * @return 执行状态
+     */
+    module_motor_status_t module_motor_update_feedback_time(module_motor_t *const me,
+                                                            uint32_t elapsed_time_ms);
+
+    /**
+     * @brief 通知反馈已更新（由派生类在解析反馈后调用）
+     * @param me 电机对象
+     * @return 执行状态
+     */
+    module_motor_status_t module_motor_notify_feedback(module_motor_t *const me);
+
+    /**
+     * @brief 获取反馈数据指针
+     * @param me 电机对象
+     * @return 反馈指针，未注册或未初始化则返回 NULL
+     */
+    const module_motor_feedback_t *module_motor_get_feedback(const module_motor_t *const me);
+
+    const char *module_motor_get_name(const module_motor_t *const me);
+    float module_motor_get_last_delta_time_s(const module_motor_t *const me);
+    uint64_t module_motor_get_enabled_runtime_us(const module_motor_t *const me);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* MODULE_MOTOR_H */
